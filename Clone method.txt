@@ -1,0 +1,406 @@
+
+%macro boostclone(outcome, name, boost,cri,var,outname);
+
+data covmed.result_&outcome._&outname;
+set _null_;
+run;
+
+data covmed.cif_&outcome._&outname;
+set _null_;
+run;
+
+
+/**ATT computation**/
+
+data cohortz;
+set covmed.cohort_matched;
+if &cri;
+run;
+
+
+
+
+
+%do i= 1 %to &boost ;
+
+proc surveyselect data=cohortz out=boost
+method=urs seed=&i samprate=1 outhits reps=1; 
+run;
+
+
+proc sort data=boost;
+by patienticn;
+run;
+
+data cohort;
+set boost;
+&var;
+run;
+
+
+/****IPCW for treatment arm***/
+
+
+
+data aaa;
+set cohort;
+run;
+
+/**clone**/
+data aaa;
+set aaa;
+group="treatment"; output;
+group="control";output;
+run;
+
+
+/***IPCW for treatment arm***/
+data control;
+set aaa;
+where group="treatment";
+order=_n_;
+run;
+
+proc sort data=control;
+by order;
+run;
+%ipcw_t(0,1); %ipcw_t(1,2);  %ipcw_t(2,3); %ipcw_t(3,4); %ipcw_t(4,5); 
+
+data treatment;
+merge control(in=a) /*control0 */control1  control2  control3  control4;
+by order;
+if a;
+ipcw0=1;
+ipcw1=1;
+if ipcw1=. then ipcw1=0;
+if ipcw2=. then ipcw2=0;
+if ipcw3=. then ipcw3=0;
+if ipcw4=. then ipcw4=0;
+if ipcw5=. then ipcw5=0;
+run;
+
+
+/****IPCW for control arm***/
+data control;
+set aaa;
+where group="control";
+order=_n_;
+run;
+proc sort data=control;
+by order;
+run;
+
+%ipcw_C(0,1); %ipcw_c(1,2);  %ipcw_c(2,3); %ipcw_c(3,4); %ipcw_c(4,5); 
+
+data summary;
+merge control(in=a) control0 control1  control2  control3  control4;
+by order;
+if a;
+ipcw0=1;
+if ipcw1=. then ipcw1=0;
+if ipcw2=. then ipcw2=0;
+if ipcw3=. then ipcw3=0;
+if ipcw4=. then ipcw4=0;
+if ipcw5=. then ipcw5=0;
+run;
+
+
+data clonewt;
+set summary treatment;
+run;
+
+proc sort data=clonewt out=cohort;
+by group patienticn;
+run;
+
+data cumwt;
+set cohort;
+array cumwt[31] cumwt0-cumwt30;
+array ipcw[6] ipcw0-ipcw5;
+cumwt0=ipcw0;
+do i=2 to 6;
+cumwt[i]=cumwt[i-1]*ipcw[i];
+end;
+do q=7 to 31;
+cumwt[q]=cumwt5;
+end;
+
+run;
+
+data covmed.wt_&outcome._&outname ;
+set cumwt;
+run;
+
+data cumwt;
+set cumwt;
+array cumwt[31] cumwt0-cumwt30;
+do v=1 to 31;
+if cumwt[v]>10 then cumwt[v]=10;
+end;
+
+
+
+run;
+
+
+
+
+data atrisk;
+set cumwt end=last;
+array atrisk[31] atrisk0-atrisk30;
+array e[31] e0-e30;
+array hz_t[31] hz_t0-hz_t30;
+array hz_c[31] hz_c0-hz_c30;
+array sumrisk_t[31] sumrisk_t0-sumrisk_t30;
+array sumrisk_c[31] sumrisk_c0-sumrisk_c30;
+array sume_t[31] sume_t0-sume_t30;
+array sume_c[31] sume_c0-sume_c30;
+
+retain sumrisk_t0-sumrisk_t30 sume_t0-sume_t30 
+ sumrisk_c0-sumrisk_c30 sume_c0-sume_c30 ;
+
+
+array cumwt[31] cumwt0-cumwt30;
+do i=1 to 31;
+if t_&outcome >=i then atrisk[i]=cumwt[i];
+else atrisk[i]=0;
+if t_&outcome =i and &outcome._out=1 then e[i]=cumwt[i];
+else e[i]=0;
+end;
+
+if _n_=1 then do q=1 to 31;
+sumrisk_t[q]=0; sumrisk_c[q]=0; sume_t[q]=0; sume_c[q]=0; 
+end;
+
+
+if group="treatment" then do v=1 to 31; 
+sumrisk_t[v]=sumrisk_t[v]+atrisk[v];
+sume_t[v]=sume_t[v]+e[v];
+end;
+
+if group="control" then do w=1 to 31; 
+sumrisk_c[w]=sumrisk_c[w]+atrisk[w];
+sume_c[w]=sume_c[w]+e[w];
+end;
+
+if last then do u=1 to 31;
+hz_t[u]=sume_t[u]/sumrisk_t[u];
+hz_c[u]=sume_c[u]/sumrisk_c[u];
+
+end;
+
+if last then output;
+keep hz_t0-hz_t30 hz_c0-hz_c30;
+
+run;
+
+
+
+data inc;
+set atrisk;
+array hz_t[31] hz_t0-hz_t30;
+array hz_c[31] hz_c0-hz_c30;
+do i=1 to 31;
+hazard_t=hz_t[i];
+hazard_c=hz_c[i];
+output;
+end;
+keep hazard_t hazard_c;
+run;
+
+data inc2;
+set inc;
+retain sur_t sur_c;
+days=_n_-1;
+if _n_=1 then do; sur_t=1; sur_c=1;end;
+sur_t=sur_t*(1-hazard_t);
+sur_c=sur_c*(1-hazard_c);
+
+if days=30 then do;
+treatrate=(1-sur_t)*100;
+controlrate=(1-sur_C)*100;
+excessburden=controlrate-treatrate;
+effect=(controlrate-treatrate)/controlrate;
+end;
+run;
+data result;
+set inc2;
+where days=30;
+outcome="&outcome";
+num=&i ;
+keep treatrate controlrate excessburden effect outcome  num;
+run;
+
+
+data cif;
+set inc2;
+length group $32.;
+outcome="&outcome";
+num=&i ;
+inc=1-sur_t; group="treat";output;
+inc=1-sur_c;group="control";output;
+
+keep inc group days outcome  num;
+run;
+proc sort data=cif;
+by group days;
+run;
+
+data covmed.result_&outcome._&outname;
+set covmed.result_&outcome._&outname result;
+run;
+
+data covmed.cif_&outcome._&outname;
+set covmed.cif_&outcome._&outname cif;
+run;
+
+%end;
+
+%mend;
+
+
+%macro ipcw_t(day, wtnum);
+
+data control&day;
+set control;
+
+%if &day=4 %then %do;
+if (index(class,"0") and t_&outcome >4) or t_ocovmed=4 then censor=1;
+else if index(class,"1") or t_&outcome >4 then censor=0;
+else if t_&outcome <=4 or (t_ocovmed<4 and ocovmed_out=1) then censor=.;
+%end;
+%else %do;
+if t_ocovmed=&day then censor=1;
+else if t_&outcome >&day then censor=0;
+else if t_&outcome <&day or (t_ocovmed<&day and ocovmed_out=1) then censor=.;
+%end;
+if censor^=.;
+run;
+
+proc freq data= control&day;
+table censor/missing out=zzz;
+where censor^=.;
+
+run;
+
+
+data zzz;
+set zzz;
+if censor=0 then call symput("sw",percent/100);
+run;
+
+
+%if &sw=1 %then %do;
+data control&day;
+set  control&day;
+ ipcw&wtnum=1;
+
+run;
+%end;
+
+%else %do;
+
+
+proc logistic data=control&day noprint ;
+class sex race smoke   ;
+model censor(event="0")=
+_X2-_X30 
+hxnin hxcovid
+longterm sex race smoke  hxsteroid vacc0 vacc1 vacc2 vacc3
+cancer cvd  Diabetes CLD dementia hyperlip hiv liver  fluvacc
+p_adjust p_withhold p_alternative p_monitor medicarenin medicarenout immuno;
+output out=ps_control&day /*(keep=patienticn class ps_control&day censor attwt)*/ pred=ps_control&day ;
+
+run;
+
+data control&day.wt;
+set ps_control&day;
+where censor=0;
+ipcw&wtnum =&sw/ps_control&day;
+
+run;
+
+
+
+data control&day;
+merge control&day(in=a) control&day.wt(keep=patienticn order ipcw&wtnum);
+by order;
+if a;
+run;
+
+data control&day;
+set control&day;
+
+if ipcw&wtnum=. then ipcw&wtnum=0;
+run;
+
+%end;
+%mend;
+
+
+%macro ipcw_c(day, wtnum);
+
+data control&day;
+set control;
+if index(class,"1") and t_&outcome > &day and molnupiravirdate-t0= &day then censor=1;
+else if (index(class,"0") or molnupiravirdate-t0>&day) and t_&outcome > &day then censor=0;
+if t_&outcome ^=&day and t_ocovmed=&day then censor=1;
+if t_ocovmed^=. and t_ocovmed<&day then censor=.;
+
+if censor^=.;
+run;
+
+proc freq data= control&day;
+table censor/missing out=zzz;
+where censor^=.;
+
+run;
+
+
+data zzz;
+set zzz;
+if censor=0 then call symput("sw",percent/100);
+run;
+
+
+%if &sw=1 %then %do;
+data control&day;
+set  control&day;
+ ipcw&wtnum=1;
+
+run;
+%end;
+
+%else %do;
+
+proc logistic data=control&day noprint ;
+class sex race smoke   ;
+model censor(event="0")=
+_X2-_X30  
+hxnin hxcovid
+longterm sex race smoke  hxsteroid vacc0 vacc1 vacc2 vacc3
+cancer cvd  Diabetes CLD dementia hyperlip hiv liver  fluvacc
+p_adjust p_withhold p_alternative p_monitor medicarenin medicarenout immuno;
+output out=ps_control&day (keep=patienticn class order ps_control&day censor) pred=ps_control&day ;
+
+run;
+
+data control&day.wt;
+set ps_control&day;
+where censor=0;
+ipcw&wtnum =&sw/ps_control&day;
+
+run;
+
+data control&day;
+set  control&day.wt;
+if ipcw&wtnum=. then ipcw&wtnum=0;
+keep patienticn order ipcw&wtnum;
+run;
+%end;
+
+%mend;
+
+
+
+
